@@ -8,7 +8,7 @@ CONF_CLIENT_SECRET = "client_secret"
 DATA_API = "api"
 DATA_COORDINATOR = "coordinator"
 
-PLATFORMS: list[str] = ["sensor", "binary_sensor"]
+PLATFORMS: list[str] = ["sensor", "binary_sensor", "camera"]
 
 BASE_URL = "https://api.formlabs.com"
 # ✅ IMPORTANT: endpoint "developer"
