@@ -1,0 +1,17 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Formlabs",
+        "description": "Enter your Formlabs Developer API credentials",
+        "data": {
+          "client_id": "Client ID",
+          "client_secret": "Client Secret"
+        }
+      }
+    },
+    "error": {
+      "auth": "Authentication failed"
+    }
+  }
+}

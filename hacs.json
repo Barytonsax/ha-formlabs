@@ -1,0 +1,8 @@
+{
+  "name": "Formlabs",
+  "content_in_root": false,
+  "domain": "formlabs",
+  "render_readme": true,
+  "iot_class": "cloud_polling",
+  "homeassistant": "2026.0.0"
+}
