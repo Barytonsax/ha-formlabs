@@ -4,7 +4,7 @@ from typing import Any
 
 import aiohttp
 
-from homeassistant.components.camera import Camera, CameraEntityFeature
+from homeassistant.components.camera import Camera
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -62,10 +62,9 @@ async def async_setup_entry(
 
 
 class FormlabsPrintThumbnailCamera(CoordinatorEntity[FormlabsCoordinator], Camera):
-    """Camera proxy that serves the current print thumbnail as an image stream."""
+    """Camera proxy that serves the current print thumbnail as image bytes."""
 
     _attr_has_entity_name = True
-    _attr_supported_features = CameraEntityFeature(0)
     _attr_icon = "mdi:image"
 
     def __init__(
@@ -76,6 +75,7 @@ class FormlabsPrintThumbnailCamera(CoordinatorEntity[FormlabsCoordinator], Camer
     ) -> None:
         CoordinatorEntity.__init__(self, coordinator)
         Camera.__init__(self)
+
         self._session = session
         self._serial = serial
 
@@ -87,7 +87,7 @@ class FormlabsPrintThumbnailCamera(CoordinatorEntity[FormlabsCoordinator], Camer
 
     @property
     def available(self) -> bool:
-        # dispo seulement si on a une URL thumbnail valide dans le payload
+        # Available only while a signed thumbnail URL exists
         return super().available and _thumbnail_url(self._printer()) is not None
 
     @property
@@ -103,8 +103,8 @@ class FormlabsPrintThumbnailCamera(CoordinatorEntity[FormlabsCoordinator], Camer
 
     async def async_camera_image(self, width: int | None = None, height: int | None = None) -> bytes | None:
         """
-        Fetch the latest signed S3 URL from the coordinator and proxy image bytes to HA.
-        If URL expired, coordinator will refresh on next poll; we simply return None on failure.
+        Fetch bytes from the signed S3 thumbnail URL and proxy them to Home Assistant.
+        Signed URLs expire; when expired, return None until next coordinator refresh.
         """
         url = _thumbnail_url(self._printer())
         if not url:
