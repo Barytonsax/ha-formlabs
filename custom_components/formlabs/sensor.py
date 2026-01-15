@@ -4,11 +4,7 @@ from typing import Any
 
 from homeassistant.components.sensor import SensorEntity, SensorDeviceClass
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import (
-    EntityCategory,
-    UnitOfTime,
-    UnitOfVolume,
-)
+from homeassistant.const import EntityCategory, UnitOfTime, UnitOfVolume, PERCENTAGE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -19,7 +15,7 @@ from .coordinator import FormlabsCoordinator
 
 
 # ----------------------------
-# Helpers
+# Helpers (printer / status / run)
 # ----------------------------
 def _printer_status(printer: dict[str, Any]) -> dict[str, Any]:
     ps = printer.get("printer_status")
@@ -82,7 +78,9 @@ def _format_hms_from_ms(ms: int | float | None) -> str | None:
     return _format_hms(sec)
 
 
-# -------- Tank helpers --------
+# ----------------------------
+# Tank helpers
+# ----------------------------
 def _tank_status(printer: dict[str, Any]) -> dict[str, Any] | None:
     ts = printer.get("tank_status")
     return ts if isinstance(ts, dict) else None
@@ -126,7 +124,9 @@ def _tank_layers_printed(printer: dict[str, Any]) -> int | None:
         return None
 
 
-# -------- Cartridge helpers (Form 4 dict / Form 3/3L list) --------
+# ----------------------------
+# Cartridge helpers (Form 4 dict / Form 3/3L list)
+# ----------------------------
 def _cartridge_status_item(printer: dict[str, Any]) -> dict[str, Any] | None:
     cs = printer.get("cartridge_status")
 
@@ -176,7 +176,18 @@ def _cartridge_remaining_ml(printer: dict[str, Any]) -> float | None:
         return None
 
 
-_SENSITIVE_SUBSTRINGS = ("token", "secret", "password", "authorization", "cookie")
+def _cartridge_is_empty(printer: dict[str, Any]) -> bool | None:
+    cart = _cartridge_obj(printer)
+    if not cart:
+        return None
+    val = cart.get("is_empty")
+    return bool(val) if val is not None else None
+
+
+# ----------------------------
+# Redaction for Raw payload
+# ----------------------------
+_SENSITIVE_SUBSTRINGS = ("token", "secret", "password", "authorization", "cookie", "signature", "awsaccesskeyid")
 
 
 def _redact(obj: Any) -> Any:
@@ -205,36 +216,38 @@ async def async_setup_entry(
     entities: list[SensorEntity] = []
 
     for serial in printers.keys():
+        # ---- Capteurs (quotidien)
         entities.extend(
             [
-                # Core
                 FormlabsPrinterStatusSensor(coordinator, serial),
-                FormlabsFirmwareSensor(coordinator, serial),
-                FormlabsLastPingSensor(coordinator, serial),
-
-                # Current job (available only when a print run exists)
                 FormlabsCurrentJobNameSensor(coordinator, serial),
                 FormlabsCurrentJobStatusSensor(coordinator, serial),
                 FormlabsProgressPercentSensor(coordinator, serial),
-                FormlabsTimeRemainingSensor(coordinator, serial),
-                FormlabsTimeRemainingHmsSensor(coordinator, serial),
-                FormlabsElapsedTimeSensor(coordinator, serial),
-                FormlabsElapsedTimeHmsSensor(coordinator, serial),
+                FormlabsPrintVolumeMlSensor(coordinator, serial),  # ✅ nouveau: volume_ml
                 FormlabsCurrentLayerSensor(coordinator, serial),
                 FormlabsLayerCountSensor(coordinator, serial),
                 FormlabsMaterialNameSensor(coordinator, serial),
-
-                # Consumables (Capteurs)
+                FormlabsTimeRemainingSensor(coordinator, serial),
+                FormlabsElapsedTimeSensor(coordinator, serial),
+                # HMS display sensors (reco: ne pas casser les numériques)
+                FormlabsTimeRemainingHmsSensor(coordinator, serial),
+                FormlabsElapsedTimeHmsSensor(coordinator, serial),
+                # Consumables
                 FormlabsCartridgeMaterialSensor(coordinator, serial),
-                FormlabsCartridgeRemainingMlSensor(coordinator, serial),
+                FormlabsCartridgeVolumeRemainingSensor(coordinator, serial),
+                FormlabsCartridgeIsEmptySensor(coordinator, serial),
                 FormlabsTankMaterialSensor(coordinator, serial),
-                FormlabsTankPrintTimeHmsSensor(coordinator, serial),
-
-                # Consumables (Diagnostic)
-                FormlabsTankPrintTimeMsSensor(coordinator, serial),
                 FormlabsTankLayersPrintedSensor(coordinator, serial),
+                FormlabsTankPrintTimeMsSensor(coordinator, serial),
+                FormlabsTankPrintTimeHmsSensor(coordinator, serial),
+            ]
+        )
 
-                # Diagnostic raw payload (keep!)
+        # ---- Diagnostic
+        entities.extend(
+            [
+                FormlabsFirmwareVersionSensor(coordinator, serial),
+                FormlabsLastPingSensor(coordinator, serial),
                 FormlabsRawPayloadSensor(coordinator, serial),
             ]
         )
@@ -243,7 +256,7 @@ async def async_setup_entry(
 
 
 # ----------------------------
-# Base
+# Base entity
 # ----------------------------
 class _Base(CoordinatorEntity[FormlabsCoordinator]):
     _attr_has_entity_name = True
@@ -262,7 +275,7 @@ class _Base(CoordinatorEntity[FormlabsCoordinator]):
             "identifiers": {(DOMAIN, self._serial)},
             "name": _safe_get_name(p),
             "manufacturer": "Formlabs",
-            "model": p.get("machine_type_id") or p.get("machine_type") or p.get("printer_type"),
+            "model": p.get("machine_type") or p.get("printer_type") or p.get("machine_type_id"),
             "sw_version": p.get("firmware_version") or p.get("firmware"),
         }
 
@@ -277,7 +290,7 @@ class _PrintRunBase(_Base):
 
 
 # ----------------------------
-# Core sensors
+# Capteurs (quotidien)
 # ----------------------------
 class FormlabsPrinterStatusSensor(_Base, SensorEntity):
     _attr_icon = "mdi:printer-3d"
@@ -292,43 +305,8 @@ class FormlabsPrinterStatusSensor(_Base, SensorEntity):
         return _printer_status_str(self._printer())
 
 
-class FormlabsFirmwareSensor(_Base, SensorEntity):
-    _attr_icon = "mdi:chip"
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
-        super().__init__(coordinator, serial)
-        self._attr_unique_id = f"{serial}_firmware_version"
-        self._attr_name = "Firmware version"
-
-    @property
-    def native_value(self):
-        p = self._printer()
-        return p.get("firmware_version") or p.get("firmware")
-
-
-class FormlabsLastPingSensor(_Base, SensorEntity):
-    _attr_device_class = SensorDeviceClass.TIMESTAMP
-    _attr_icon = "mdi:clock-outline"
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
-        super().__init__(coordinator, serial)
-        self._attr_unique_id = f"{serial}_last_ping"
-        self._attr_name = "Last ping"
-
-    @property
-    def native_value(self):
-        p = self._printer()
-        ps = _printer_status(p)
-        return _to_dt(ps.get("last_pinged_at") or p.get("last_pinged_at"))
-
-
-# ----------------------------
-# Current job sensors
-# ----------------------------
 class FormlabsCurrentJobNameSensor(_PrintRunBase, SensorEntity):
-    _attr_icon = "mdi:briefcase-outline"
+    _attr_icon = "mdi:briefcase"
 
     def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
         super().__init__(coordinator, serial)
@@ -339,6 +317,28 @@ class FormlabsCurrentJobNameSensor(_PrintRunBase, SensorEntity):
     def native_value(self):
         run = self._run() or {}
         return run.get("name")
+
+    @property
+    def extra_state_attributes(self):
+        """
+        Reco: le thumbnail est une URL AWS signée (Expire/Signature),
+        donc on l'expose en attribut (pas en sensor dédié).
+        """
+        run = self._run() or {}
+        attrs: dict[str, Any] = {}
+
+        if run.get("guid"):
+            attrs["job_guid"] = run.get("guid")
+
+        # Formlabs payload:
+        # print_thumbnail: { thumbnail: "<signed url>" }
+        pt = run.get("print_thumbnail")
+        if isinstance(pt, dict):
+            thumb = pt.get("thumbnail")
+            if thumb:
+                attrs["thumbnail_url"] = thumb
+
+        return attrs
 
 
 class FormlabsCurrentJobStatusSensor(_PrintRunBase, SensorEntity):
@@ -358,8 +358,7 @@ class FormlabsCurrentJobStatusSensor(_PrintRunBase, SensorEntity):
 
 class FormlabsProgressPercentSensor(_PrintRunBase, SensorEntity):
     _attr_icon = "mdi:progress-check"
-    _attr_native_unit_of_measurement = "%"
-    _attr_suggested_display_precision = 0
+    _attr_native_unit_of_measurement = PERCENTAGE
 
     def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
         super().__init__(coordinator, serial)
@@ -369,113 +368,44 @@ class FormlabsProgressPercentSensor(_PrintRunBase, SensorEntity):
     @property
     def native_value(self):
         run = self._run() or {}
+        val = run.get("progress") or run.get("progress_percent")
         try:
-            layer = run.get("currently_printing_layer")
-            total = run.get("layer_count")
-            if layer is None or total in (None, 0):
+            if val is None:
                 return None
-            layer_f = float(layer)
-            total_f = float(total)
-            if total_f <= 0:
-                return None
-            pct = (layer_f / total_f) * 100.0
-            if pct < 0:
-                pct = 0
-            if pct > 100:
-                pct = 100
-            return round(pct)
+            # si API renvoie 0..1 => convertir
+            f = float(val)
+            if 0.0 <= f <= 1.0:
+                f *= 100.0
+            return round(f, 1)
         except (TypeError, ValueError):
             return None
 
 
-class FormlabsTimeRemainingSensor(_PrintRunBase, SensorEntity):
-    _attr_device_class = SensorDeviceClass.DURATION
-    _attr_native_unit_of_measurement = UnitOfTime.SECONDS
-    _attr_icon = "mdi:timer-sand"
+class FormlabsPrintVolumeMlSensor(_PrintRunBase, SensorEntity):
+    """✅ Printer status -> current_print_run.volume_ml (estimated print volume)."""
+
+    _attr_icon = "mdi:cup-water"
+    _attr_native_unit_of_measurement = UnitOfVolume.MILLILITERS
 
     def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
         super().__init__(coordinator, serial)
-        self._attr_unique_id = f"{serial}_time_remaining"
-        self._attr_name = "Time remaining"
+        self._attr_unique_id = f"{serial}_print_volume_ml"
+        self._attr_name = "Print volume"
 
     @property
     def native_value(self):
         run = self._run() or {}
-        ms = run.get("estimated_time_remaining_ms")
+        val = run.get("volume_ml")
         try:
-            if ms is None:
+            if val is None:
                 return None
-            return int(float(ms) / 1000.0)
+            return round(float(val), 2)
         except (TypeError, ValueError):
             return None
-
-
-class FormlabsTimeRemainingHmsSensor(_PrintRunBase, SensorEntity):
-    _attr_icon = "mdi:timer-sand"
-
-    def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
-        super().__init__(coordinator, serial)
-        self._attr_unique_id = f"{serial}_time_remaining_hms"
-        self._attr_name = "Time remaining (HMS)"
-
-    @property
-    def native_value(self):
-        run = self._run() or {}
-        ms = run.get("estimated_time_remaining_ms")
-        try:
-            if ms is None:
-                return None
-            seconds = float(ms) / 1000.0
-        except (TypeError, ValueError):
-            return None
-        return _format_hms(seconds)
-
-
-class FormlabsElapsedTimeSensor(_PrintRunBase, SensorEntity):
-    _attr_device_class = SensorDeviceClass.DURATION
-    _attr_native_unit_of_measurement = UnitOfTime.SECONDS
-    _attr_icon = "mdi:timer-outline"
-
-    def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
-        super().__init__(coordinator, serial)
-        self._attr_unique_id = f"{serial}_elapsed_time"
-        self._attr_name = "Elapsed time"
-
-    @property
-    def native_value(self):
-        run = self._run() or {}
-        ms = run.get("elapsed_duration_ms")
-        try:
-            if ms is None:
-                return None
-            return int(float(ms) / 1000.0)
-        except (TypeError, ValueError):
-            return None
-
-
-class FormlabsElapsedTimeHmsSensor(_PrintRunBase, SensorEntity):
-    _attr_icon = "mdi:timer-outline"
-
-    def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
-        super().__init__(coordinator, serial)
-        self._attr_unique_id = f"{serial}_elapsed_time_hms"
-        self._attr_name = "Elapsed time (HMS)"
-
-    @property
-    def native_value(self):
-        run = self._run() or {}
-        ms = run.get("elapsed_duration_ms")
-        try:
-            if ms is None:
-                return None
-            seconds = float(ms) / 1000.0
-        except (TypeError, ValueError):
-            return None
-        return _format_hms(seconds)
 
 
 class FormlabsCurrentLayerSensor(_PrintRunBase, SensorEntity):
-    _attr_icon = "mdi:layers-triple"
+    _attr_icon = "mdi:layers-outline"
 
     def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
         super().__init__(coordinator, serial)
@@ -493,7 +423,7 @@ class FormlabsCurrentLayerSensor(_PrintRunBase, SensorEntity):
 
 
 class FormlabsLayerCountSensor(_PrintRunBase, SensorEntity):
-    _attr_icon = "mdi:layers-outline"
+    _attr_icon = "mdi:layers-triple"
 
     def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
         super().__init__(coordinator, serial)
@@ -511,7 +441,7 @@ class FormlabsLayerCountSensor(_PrintRunBase, SensorEntity):
 
 
 class FormlabsMaterialNameSensor(_PrintRunBase, SensorEntity):
-    _attr_icon = "mdi:flask-outline"
+    _attr_icon = "mdi:flask"
 
     def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
         super().__init__(coordinator, serial)
@@ -521,14 +451,97 @@ class FormlabsMaterialNameSensor(_PrintRunBase, SensorEntity):
     @property
     def native_value(self):
         run = self._run() or {}
-        return run.get("material_name") or run.get("material")
+        val = run.get("material") or run.get("material_name")
+        return str(val) if val is not None else None
 
 
-# ----------------------------
-# Consumables (Capteurs)
-# ----------------------------
+class FormlabsTimeRemainingSensor(_PrintRunBase, SensorEntity):
+    _attr_icon = "mdi:timer-sand"
+    _attr_device_class = SensorDeviceClass.DURATION
+    _attr_native_unit_of_measurement = UnitOfTime.SECONDS
+
+    def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
+        super().__init__(coordinator, serial)
+        self._attr_unique_id = f"{serial}_time_remaining"
+        self._attr_name = "Time remaining"
+
+    @property
+    def native_value(self):
+        run = self._run() or {}
+        # API: estimated_time_remaining_ms
+        ms = run.get("estimated_time_remaining_ms")
+        try:
+            if ms is None:
+                return None
+            sec = int(float(ms) / 1000.0)
+            if sec < 0:
+                sec = 0
+            return sec
+        except (TypeError, ValueError):
+            return None
+
+
+class FormlabsElapsedTimeSensor(_PrintRunBase, SensorEntity):
+    _attr_icon = "mdi:timer-outline"
+    _attr_device_class = SensorDeviceClass.DURATION
+    _attr_native_unit_of_measurement = UnitOfTime.SECONDS
+
+    def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
+        super().__init__(coordinator, serial)
+        self._attr_unique_id = f"{serial}_elapsed_time"
+        self._attr_name = "Elapsed time"
+
+    @property
+    def native_value(self):
+        run = self._run() or {}
+        # API: elapsed_duration_ms
+        ms = run.get("elapsed_duration_ms")
+        try:
+            if ms is None:
+                return None
+            sec = int(float(ms) / 1000.0)
+            if sec < 0:
+                sec = 0
+            return sec
+        except (TypeError, ValueError):
+            return None
+
+
+# HMS display sensors (text)
+class FormlabsTimeRemainingHmsSensor(_PrintRunBase, SensorEntity):
+    _attr_icon = "mdi:timer-sand"
+
+    def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
+        super().__init__(coordinator, serial)
+        self._attr_unique_id = f"{serial}_time_remaining_hms"
+        self._attr_name = "Time remaining (HMS)"
+
+    @property
+    def native_value(self):
+        # reuse seconds sensor logic
+        run = self._run() or {}
+        ms = run.get("estimated_time_remaining_ms")
+        return _format_hms_from_ms(ms)
+
+
+class FormlabsElapsedTimeHmsSensor(_PrintRunBase, SensorEntity):
+    _attr_icon = "mdi:timer-outline"
+
+    def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
+        super().__init__(coordinator, serial)
+        self._attr_unique_id = f"{serial}_elapsed_time_hms"
+        self._attr_name = "Elapsed time (HMS)"
+
+    @property
+    def native_value(self):
+        run = self._run() or {}
+        ms = run.get("elapsed_duration_ms")
+        return _format_hms_from_ms(ms)
+
+
+# Cartridge sensors (capteurs)
 class FormlabsCartridgeMaterialSensor(_Base, SensorEntity):
-    _attr_icon = "mdi:cartridge"
+    _attr_icon = "mdi:flask-outline"
 
     def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
         super().__init__(coordinator, serial)
@@ -540,11 +553,9 @@ class FormlabsCartridgeMaterialSensor(_Base, SensorEntity):
         return _cartridge_material(self._printer())
 
 
-class FormlabsCartridgeRemainingMlSensor(_Base, SensorEntity):
+class FormlabsCartridgeVolumeRemainingSensor(_Base, SensorEntity):
     _attr_icon = "mdi:water-percent"
-    _attr_device_class = SensorDeviceClass.VOLUME
     _attr_native_unit_of_measurement = UnitOfVolume.MILLILITERS
-    _attr_suggested_display_precision = 0
 
     def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
         super().__init__(coordinator, serial)
@@ -553,9 +564,24 @@ class FormlabsCartridgeRemainingMlSensor(_Base, SensorEntity):
 
     @property
     def native_value(self):
-        return _cartridge_remaining_ml(self._printer())
+        val = _cartridge_remaining_ml(self._printer())
+        return round(val, 1) if val is not None else None
 
 
+class FormlabsCartridgeIsEmptySensor(_Base, SensorEntity):
+    _attr_icon = "mdi:alert"
+
+    def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
+        super().__init__(coordinator, serial)
+        self._attr_unique_id = f"{serial}_cartridge_is_empty"
+        self._attr_name = "Cartridge is empty"
+
+    @property
+    def native_value(self):
+        return _cartridge_is_empty(self._printer())
+
+
+# Tank sensors (capteurs)
 class FormlabsTankMaterialSensor(_Base, SensorEntity):
     _attr_icon = "mdi:cup"
 
@@ -569,8 +595,35 @@ class FormlabsTankMaterialSensor(_Base, SensorEntity):
         return _tank_material(self._printer())
 
 
+class FormlabsTankLayersPrintedSensor(_Base, SensorEntity):
+    _attr_icon = "mdi:layers-triple"
+
+    def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
+        super().__init__(coordinator, serial)
+        self._attr_unique_id = f"{serial}_tank_layers_printed"
+        self._attr_name = "Tank layers printed"
+
+    @property
+    def native_value(self):
+        return _tank_layers_printed(self._printer())
+
+
+class FormlabsTankPrintTimeMsSensor(_Base, SensorEntity):
+    _attr_icon = "mdi:clock-outline"
+    _attr_native_unit_of_measurement = "ms"
+
+    def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
+        super().__init__(coordinator, serial)
+        self._attr_unique_id = f"{serial}_tank_print_time_ms"
+        self._attr_name = "Tank print time (ms)"
+
+    @property
+    def native_value(self):
+        return _tank_print_time_ms(self._printer())
+
+
 class FormlabsTankPrintTimeHmsSensor(_Base, SensorEntity):
-    _attr_icon = "mdi:timer-cog-outline"
+    _attr_icon = "mdi:clock-time-eight-outline"
 
     def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
         super().__init__(coordinator, serial)
@@ -583,42 +636,42 @@ class FormlabsTankPrintTimeHmsSensor(_Base, SensorEntity):
 
 
 # ----------------------------
-# Consumables (Diagnostic)
+# Diagnostic sensors
 # ----------------------------
-class FormlabsTankPrintTimeMsSensor(_Base, SensorEntity):
-    _attr_icon = "mdi:timer-cog-outline"
-    _attr_native_unit_of_measurement = "ms"
+class FormlabsFirmwareVersionSensor(_Base, SensorEntity):
+    _attr_icon = "mdi:chip"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
         super().__init__(coordinator, serial)
-        self._attr_unique_id = f"{serial}_tank_print_time_ms"
-        self._attr_name = "Tank print time (ms)"
+        self._attr_unique_id = f"{serial}_firmware_version"
+        self._attr_name = "Firmware version"
 
     @property
     def native_value(self):
-        return _tank_print_time_ms(self._printer())
+        p = self._printer()
+        return p.get("firmware_version") or p.get("firmware")
 
 
-class FormlabsTankLayersPrintedSensor(_Base, SensorEntity):
-    _attr_icon = "mdi:layers"
+class FormlabsLastPingSensor(_Base, SensorEntity):
+    _attr_icon = "mdi:clock-outline"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
 
     def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
         super().__init__(coordinator, serial)
-        self._attr_unique_id = f"{serial}_tank_layers_printed"
-        self._attr_name = "Tank layers printed"
+        self._attr_unique_id = f"{serial}_last_ping"
+        self._attr_name = "Last ping"
 
     @property
     def native_value(self):
-        return _tank_layers_printed(self._printer())
+        p = self._printer()
+        ps = _printer_status(p)
+        return _to_dt(ps.get("last_pinged_at") or ps.get("last_ping") or p.get("last_pinged_at"))
 
 
-# ----------------------------
-# Diagnostic "Raw payload" sensor (keep!)
-# ----------------------------
 class FormlabsRawPayloadSensor(_Base, SensorEntity):
-    _attr_icon = "mdi:bug-outline"
+    _attr_icon = "mdi:code-json"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
     def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
@@ -628,18 +681,10 @@ class FormlabsRawPayloadSensor(_Base, SensorEntity):
 
     @property
     def native_value(self):
-        return _printer_status_str(self._printer()) or "unknown"
+        # state lisible (sans balancer tout le JSON en state)
+        return _printer_status_str(self._printer())
 
     @property
     def extra_state_attributes(self):
-        p = self._printer()
-        attrs = {
-            "serial": p.get("serial"),
-            "alias": p.get("alias"),
-            "machine_type_id": p.get("machine_type_id"),
-            "firmware_version": p.get("firmware_version") or p.get("firmware"),
-            "printer_status": p.get("printer_status"),
-            "tank_status": p.get("tank_status"),
-            "cartridge_status": p.get("cartridge_status"),
-        }
-        return _redact(attrs)
+        # JSON complet en attribut, redacted
+        return {"payload": _redact(self._printer())}
