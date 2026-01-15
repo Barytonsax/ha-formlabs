@@ -117,7 +117,7 @@ def _tank_layers_printed(printer: dict[str, Any]) -> int | None:
     tank = _tank_obj(printer)
     if not tank:
         return None
-    val = tank.get("layers_printed")
+    val = tank.get("layers_printed") or tank.get("layer_count")
     try:
         return int(val) if val is not None else None
     except (TypeError, ValueError):
@@ -181,13 +181,26 @@ def _cartridge_is_empty(printer: dict[str, Any]) -> bool | None:
     if not cart:
         return None
     val = cart.get("is_empty")
-    return bool(val) if val is not None else None
+    if isinstance(val, bool):
+        return val
+    if val is None:
+        return None
+    return str(val).strip().lower() in ("true", "1", "yes", "on")
 
 
 # ----------------------------
 # Redaction for Raw payload
 # ----------------------------
-_SENSITIVE_SUBSTRINGS = ("token", "secret", "password", "authorization", "cookie", "signature", "awsaccesskeyid")
+_SENSITIVE_SUBSTRINGS = (
+    "token",
+    "secret",
+    "password",
+    "authorization",
+    "cookie",
+    "signature",
+    "awsaccesskeyid",
+    "email",
+)
 
 
 def _redact(obj: Any) -> Any:
@@ -216,20 +229,20 @@ async def async_setup_entry(
     entities: list[SensorEntity] = []
 
     for serial in printers.keys():
-        # ---- Capteurs (quotidien)
+        # ---- Capteurs
         entities.extend(
             [
                 FormlabsPrinterStatusSensor(coordinator, serial),
                 FormlabsCurrentJobNameSensor(coordinator, serial),
                 FormlabsCurrentJobStatusSensor(coordinator, serial),
                 FormlabsProgressPercentSensor(coordinator, serial),
-                FormlabsPrintVolumeMlSensor(coordinator, serial),  # ✅ nouveau: volume_ml
+                FormlabsPrintVolumeMlSensor(coordinator, serial),
                 FormlabsCurrentLayerSensor(coordinator, serial),
                 FormlabsLayerCountSensor(coordinator, serial),
                 FormlabsMaterialNameSensor(coordinator, serial),
                 FormlabsTimeRemainingSensor(coordinator, serial),
                 FormlabsElapsedTimeSensor(coordinator, serial),
-                # HMS display sensors (reco: ne pas casser les numériques)
+                # HMS display sensors
                 FormlabsTimeRemainingHmsSensor(coordinator, serial),
                 FormlabsElapsedTimeHmsSensor(coordinator, serial),
                 # Consumables
@@ -290,7 +303,7 @@ class _PrintRunBase(_Base):
 
 
 # ----------------------------
-# Capteurs (quotidien)
+# Capteurs
 # ----------------------------
 class FormlabsPrinterStatusSensor(_Base, SensorEntity):
     _attr_icon = "mdi:printer-3d"
@@ -320,18 +333,12 @@ class FormlabsCurrentJobNameSensor(_PrintRunBase, SensorEntity):
 
     @property
     def extra_state_attributes(self):
-        """
-        Reco: le thumbnail est une URL AWS signée (Expire/Signature),
-        donc on l'expose en attribut (pas en sensor dédié).
-        """
         run = self._run() or {}
         attrs: dict[str, Any] = {}
 
         if run.get("guid"):
             attrs["job_guid"] = run.get("guid")
 
-        # Formlabs payload:
-        # print_thumbnail: { thumbnail: "<signed url>" }
         pt = run.get("print_thumbnail")
         if isinstance(pt, dict):
             thumb = pt.get("thumbnail")
@@ -368,21 +375,43 @@ class FormlabsProgressPercentSensor(_PrintRunBase, SensorEntity):
     @property
     def native_value(self):
         run = self._run() or {}
+
+        # 1) Direct progress if present (other models / future API)
         val = run.get("progress") or run.get("progress_percent")
+        if val is not None:
+            try:
+                f = float(val)
+                if 0.0 <= f <= 1.0:
+                    f *= 100.0
+                return round(max(0.0, min(100.0, f)), 1)
+            except (TypeError, ValueError):
+                pass
+
+        # 2) Compute from layers (best for Form 4)
+        cur_layer = run.get("currently_printing_layer")
+        layer_count = run.get("layer_count")
         try:
-            if val is None:
-                return None
-            # si API renvoie 0..1 => convertir
-            f = float(val)
-            if 0.0 <= f <= 1.0:
-                f *= 100.0
-            return round(f, 1)
-        except (TypeError, ValueError):
-            return None
+            if cur_layer is not None and layer_count:
+                f = (float(cur_layer) / float(layer_count)) * 100.0
+                return round(max(0.0, min(100.0, f)), 1)
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+
+        # 3) Fallback compute from time
+        elapsed_ms = run.get("elapsed_duration_ms")
+        total_ms = run.get("estimated_duration_ms")
+        try:
+            if elapsed_ms is not None and total_ms:
+                f = (float(elapsed_ms) / float(total_ms)) * 100.0
+                return round(max(0.0, min(100.0, f)), 1)
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+
+        return None
 
 
 class FormlabsPrintVolumeMlSensor(_PrintRunBase, SensorEntity):
-    """✅ Printer status -> current_print_run.volume_ml (estimated print volume)."""
+    """Estimated resin volume for the current print (volume_ml)."""
 
     _attr_icon = "mdi:cup-water"
     _attr_native_unit_of_measurement = UnitOfVolume.MILLILITERS
@@ -451,7 +480,7 @@ class FormlabsMaterialNameSensor(_PrintRunBase, SensorEntity):
     @property
     def native_value(self):
         run = self._run() or {}
-        val = run.get("material") or run.get("material_name")
+        val = run.get("material_name") or run.get("material")
         return str(val) if val is not None else None
 
 
@@ -468,15 +497,12 @@ class FormlabsTimeRemainingSensor(_PrintRunBase, SensorEntity):
     @property
     def native_value(self):
         run = self._run() or {}
-        # API: estimated_time_remaining_ms
         ms = run.get("estimated_time_remaining_ms")
         try:
             if ms is None:
                 return None
             sec = int(float(ms) / 1000.0)
-            if sec < 0:
-                sec = 0
-            return sec
+            return max(sec, 0)
         except (TypeError, ValueError):
             return None
 
@@ -494,15 +520,12 @@ class FormlabsElapsedTimeSensor(_PrintRunBase, SensorEntity):
     @property
     def native_value(self):
         run = self._run() or {}
-        # API: elapsed_duration_ms
         ms = run.get("elapsed_duration_ms")
         try:
             if ms is None:
                 return None
             sec = int(float(ms) / 1000.0)
-            if sec < 0:
-                sec = 0
-            return sec
+            return max(sec, 0)
         except (TypeError, ValueError):
             return None
 
@@ -518,10 +541,8 @@ class FormlabsTimeRemainingHmsSensor(_PrintRunBase, SensorEntity):
 
     @property
     def native_value(self):
-        # reuse seconds sensor logic
         run = self._run() or {}
-        ms = run.get("estimated_time_remaining_ms")
-        return _format_hms_from_ms(ms)
+        return _format_hms_from_ms(run.get("estimated_time_remaining_ms"))
 
 
 class FormlabsElapsedTimeHmsSensor(_PrintRunBase, SensorEntity):
@@ -535,11 +556,10 @@ class FormlabsElapsedTimeHmsSensor(_PrintRunBase, SensorEntity):
     @property
     def native_value(self):
         run = self._run() or {}
-        ms = run.get("elapsed_duration_ms")
-        return _format_hms_from_ms(ms)
+        return _format_hms_from_ms(run.get("elapsed_duration_ms"))
 
 
-# Cartridge sensors (capteurs)
+# Cartridge sensors
 class FormlabsCartridgeMaterialSensor(_Base, SensorEntity):
     _attr_icon = "mdi:flask-outline"
 
@@ -581,7 +601,7 @@ class FormlabsCartridgeIsEmptySensor(_Base, SensorEntity):
         return _cartridge_is_empty(self._printer())
 
 
-# Tank sensors (capteurs)
+# Tank sensors
 class FormlabsTankMaterialSensor(_Base, SensorEntity):
     _attr_icon = "mdi:cup"
 
@@ -681,10 +701,8 @@ class FormlabsRawPayloadSensor(_Base, SensorEntity):
 
     @property
     def native_value(self):
-        # state lisible (sans balancer tout le JSON en state)
         return _printer_status_str(self._printer())
 
     @property
     def extra_state_attributes(self):
-        # JSON complet en attribut, redacted
         return {"payload": _redact(self._printer())}
