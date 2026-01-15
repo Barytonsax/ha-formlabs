@@ -1,0 +1,11 @@
+{
+  "domain": "formlabs",
+  "name": "Formlabs",
+  "config_flow": true,
+  "documentation": "https://example.invalid",
+  "integration_type": "hub",
+  "iot_class": "cloud_polling",
+  "requirements": [],
+  "codeowners": [],
+  "version": "0.1.0"
+}
