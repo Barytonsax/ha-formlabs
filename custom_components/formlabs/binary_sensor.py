@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from homeassistant.components.binary_sensor import BinarySensorEntity
+from homeassistant.components.binary_sensor import BinarySensorEntity, BinarySensorDeviceClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -17,8 +17,9 @@ def _printer_status(printer: dict[str, Any]) -> dict[str, Any]:
     return ps if isinstance(ps, dict) else {}
 
 
-def _status_upper(printer: dict[str, Any]) -> str:
-    return str(_printer_status(printer).get("status") or "").upper()
+def _status(printer: dict[str, Any]) -> str | None:
+    val = _printer_status(printer).get("status")
+    return str(val) if val is not None else None
 
 
 def _safe_get_name(printer: dict[str, Any]) -> str:
@@ -31,26 +32,24 @@ def _safe_get_name(printer: dict[str, Any]) -> str:
     )
 
 
-async def async_setup_entry(
-    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
-) -> None:
-    coordinator: FormlabsCoordinator = hass.data[DOMAIN][entry.entry_id][DATA_COORDINATOR]
-    printers = coordinator.data.get("printers_by_serial", {})
-    entities: list[BinarySensorEntity] = []
-
-    for serial in printers.keys():
-        entities.extend(
-            [
-                FormlabsOnlineBinary(coordinator, serial),
-                FormlabsPrintingBinary(coordinator, serial),
-                FormlabsPausedBinary(coordinator, serial),
-                FormlabsErrorBinary(coordinator, serial),
-                FormlabsWaitingForResolutionBinary(coordinator, serial),
-                FormlabsReadyToPrintBinary(coordinator, serial),
-            ]
-        )
-
-    async_add_entities(entities)
+def _ready_to_print_bool(printer: dict[str, Any]) -> bool | None:
+    """
+    Formlabs payload examples:
+      ready_to_print: READY_TO_PRINT_READY
+      ready_to_print: READY_TO_PRINT_NOT_READY
+    Some models may use simple booleans or different strings.
+    """
+    val = _printer_status(printer).get("ready_to_print")
+    if val is None:
+        return None
+    if isinstance(val, bool):
+        return val
+    s = str(val).upper()
+    if "NOT_READY" in s:
+        return False
+    if s.endswith("_READY") or "READY" == s:
+        return True
+    return None
 
 
 class _Base(CoordinatorEntity[FormlabsCoordinator]):
@@ -75,7 +74,30 @@ class _Base(CoordinatorEntity[FormlabsCoordinator]):
         }
 
 
-class FormlabsOnlineBinary(_Base, BinarySensorEntity):
+async def async_setup_entry(
+    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+) -> None:
+    coordinator: FormlabsCoordinator = hass.data[DOMAIN][entry.entry_id][DATA_COORDINATOR]
+    printers = coordinator.data.get("printers_by_serial", {})
+    entities: list[BinarySensorEntity] = []
+
+    for serial in printers.keys():
+        entities.extend(
+            [
+                FormlabsOnlineBinarySensor(coordinator, serial),
+                FormlabsPrintingBinarySensor(coordinator, serial),
+                FormlabsPausedBinarySensor(coordinator, serial),
+                FormlabsErrorBinarySensor(coordinator, serial),
+                FormlabsWaitingForResolutionBinarySensor(coordinator, serial),
+                FormlabsReadyToPrintBinarySensor(coordinator, serial),
+            ]
+        )
+
+    async_add_entities(entities)
+
+
+class FormlabsOnlineBinarySensor(_Base, BinarySensorEntity):
+    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
     _attr_icon = "mdi:lan-connect"
 
     def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
@@ -85,12 +107,15 @@ class FormlabsOnlineBinary(_Base, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool:
-        # pragmatique: si on a un status non vide, on considère online
-        return _status_upper(self._printer()) != ""
+        # "Online" = we have a status and it isn't explicitly OFFLINE
+        s = _status(self._printer())
+        if s is None:
+            return False
+        return str(s).upper() not in ("OFFLINE", "DISCONNECTED", "UNKNOWN")
 
 
-class FormlabsPrintingBinary(_Base, BinarySensorEntity):
-    _attr_icon = "mdi:printer-3d"
+class FormlabsPrintingBinarySensor(_Base, BinarySensorEntity):
+    _attr_icon = "mdi:printer-3d-nozzle"
 
     def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
         super().__init__(coordinator, serial)
@@ -99,10 +124,10 @@ class FormlabsPrintingBinary(_Base, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool:
-        return _status_upper(self._printer()) == "PRINTING"
+        return str(_status(self._printer()) or "").upper() == "PRINTING"
 
 
-class FormlabsPausedBinary(_Base, BinarySensorEntity):
+class FormlabsPausedBinarySensor(_Base, BinarySensorEntity):
     _attr_icon = "mdi:pause-circle"
 
     def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
@@ -112,10 +137,10 @@ class FormlabsPausedBinary(_Base, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool:
-        return _status_upper(self._printer()) == "PAUSED"
+        return str(_status(self._printer()) or "").upper() == "PAUSED"
 
 
-class FormlabsErrorBinary(_Base, BinarySensorEntity):
+class FormlabsErrorBinarySensor(_Base, BinarySensorEntity):
     _attr_icon = "mdi:alert-circle"
 
     def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
@@ -125,11 +150,13 @@ class FormlabsErrorBinary(_Base, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool:
-        return _status_upper(self._printer()) == "ERROR"
+        s = str(_status(self._printer()) or "").upper()
+        # Formlabs sometimes uses statuses like CHECK_PRINTER
+        return s in ("ERROR", "CHECK_PRINTER", "FAILED", "FAILURE", "ATTENTION")
 
 
-class FormlabsWaitingForResolutionBinary(_Base, BinarySensorEntity):
-    _attr_icon = "mdi:alert-decagram-outline"
+class FormlabsWaitingForResolutionBinarySensor(_Base, BinarySensorEntity):
+    _attr_icon = "mdi:account-alert"
 
     def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
         super().__init__(coordinator, serial)
@@ -138,12 +165,12 @@ class FormlabsWaitingForResolutionBinary(_Base, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool:
-        ps = _printer_status(self._printer())
-        val = ps.get("waiting_for_resolution")
-        return bool(val) if val is not None else False
+        s = str(_status(self._printer()) or "").upper()
+        # Conservative detection: any "RESOLUTION" keyword or explicit state
+        return s == "WAITING_FOR_RESOLUTION" or "RESOLUTION" in s
 
 
-class FormlabsReadyToPrintBinary(_Base, BinarySensorEntity):
+class FormlabsReadyToPrintBinarySensor(_Base, BinarySensorEntity):
     _attr_icon = "mdi:check-decagram"
 
     def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
@@ -153,11 +180,5 @@ class FormlabsReadyToPrintBinary(_Base, BinarySensorEntity):
 
     @property
     def is_on(self) -> bool:
-        ps = _printer_status(self._printer())
-        val = ps.get("ready_to_print")
-        # Dans tes payloads c'est souvent bool/str selon modèles
-        if isinstance(val, bool):
-            return val
-        if val is None:
-            return False
-        return str(val).upper() in ("READY", "TRUE", "YES", "ON", "1")
+        v = _ready_to_print_bool(self._printer())
+        return bool(v) if v is not None else False
