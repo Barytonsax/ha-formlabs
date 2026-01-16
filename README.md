@@ -6,7 +6,7 @@
 
 Unofficial **Home Assistant integration for Formlabs 3D printers**, built on top of the **Formlabs Developer Cloud API (OAuth 2.0)**.
 
-Goal: provide **clean entities**, **useful consumables tracking**, and **developer-friendly diagnostics**, aligned with Home Assistant best practices.
+The goal of this integration is to provide **clean, stable entities**, **useful consumables tracking**, and **developer-friendly diagnostics**, following Home Assistant best practices.
 
 ---
 
@@ -14,9 +14,10 @@ Goal: provide **clean entities**, **useful consumables tracking**, and **develop
 
 - 🖨️ Printer state & print job monitoring (status, progress, layers, timings)
 - 🧪 Consumables tracking (tank + cartridge)
-- 🖼️ Print thumbnail (attribute + optional camera entity for dashboards)
+- 🖼️ Print thumbnail (attribute + optional camera entity)
 - 🛠️ Diagnostics (firmware, last ping, redacted raw payload)
-- ✅ **Stable entities after a print ends** (no more Unavailable/Unknown just because the job finished)
+- ✅ **Stable entities after a print ends**  
+  (no more `Unavailable` / `Unknown` just because a job finished)
 
 ---
 
@@ -46,16 +47,16 @@ Goal: provide **clean entities**, **useful consumables tracking**, and **develop
 - **Print thumbnail**
   - Available as an attribute on the current job sensor (signed URL, expires)
   - Optional **camera entity** to display the thumbnail directly in Lovelace dashboards  
-    (proxies the signed URL and avoids “disappearing” thumbnails)
+    (proxies the signed URL and avoids disappearing images after a print ends)
 
 ### Diagnostics
 - Firmware version
 - Last ping
 - Raw printer payload (full API response, sensitive data redacted)
 
-The **Raw payload** sensor is especially useful to:
+The **Raw payload** diagnostic sensor is especially useful to:
 - understand API differences between printer generations
-- debug missing fields
+- debug missing or model-specific fields
 - contribute improvements to the integration
 
 ---
@@ -70,7 +71,7 @@ Tested with:
 - Form 3L
 
 > ℹ️ Some API structures differ between models  
-> (e.g. Form 4 single cartridge vs Form 3/3L multiple cartridges).  
+> (for example Form 4 single cartridge vs Form 3/3L multiple cartridges).  
 > These differences are handled transparently by the integration.
 
 ---
@@ -97,7 +98,8 @@ You will need:
 4. Download → Restart Home Assistant
 
 ### Option B — Manual installation
-1. Copy `custom_components/formlabs` into: `config/custom_components/formlabs`
+1. Copy `custom_components/formlabs` into:  
+   `config/custom_components/formlabs`
 2. Restart Home Assistant
 3. Go to **Settings → Devices & Services → Add Integration**
 4. Search for **Formlabs**
@@ -123,30 +125,31 @@ This keeps dashboards clean while still exposing advanced data when needed.
 
 ## ✅ Recommended dashboard usage
 
-- Use **Progress**, **Time remaining**, and **Printing** binary sensor for automations and UI.
-- Use the **Print thumbnail camera** in a Lovelace picture card (great for “print monitoring” dashboards).
-- Use **Raw payload** when reporting issues (it helps reproduce API differences quickly).
+- Use **Progress**, **Time remaining**, and **Printing** binary sensor for automations.
+- Use the **Print thumbnail camera** in a Lovelace picture card for print monitoring.
+- Use **Raw payload** when reporting issues — it helps reproduce API differences quickly.
 
 ---
 
 ## 🧯 Troubleshooting
 
-### I see `Unavailable` / `Unknown` sensors
-- Make sure the printer is actually **online**.
-- Restart Home Assistant (or reload the integration).
-- If it persists, check the **Raw payload** diagnostic sensor to confirm what the API returns.
+### Sensors show `Unavailable` or `Unknown`
+- Make sure the printer is **online**.
+- Restart Home Assistant or reload the integration.
+- Check the **Raw payload** diagnostic sensor to confirm what the API returns.
 
-### Thumbnail is blank sometimes
-Signed URLs can expire. The camera entity proxies URLs and keeps the last valid image, but if the printer provides no thumbnail at all for a job, there may be nothing to display.
+### Thumbnail is sometimes blank
+Signed URLs can expire.  
+The camera entity keeps the last valid image, but if the printer provides no thumbnail for a job, nothing can be displayed.
 
 ---
 
 ## 🤝 Contributing
 
-PRs and issues are welcome—especially:
-- support for additional fields exposed by the API
+Issues and pull requests are welcome, especially for:
+- additional API fields
 - better status mappings
-- improvements to diagnostics and docs
+- documentation improvements
 
 When opening an issue, please include:
 - printer model
