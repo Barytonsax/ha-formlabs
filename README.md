@@ -6,7 +6,7 @@
 
 Unofficial **Home Assistant integration for Formlabs 3D printers**, built on top of the **Formlabs Developer Cloud API (OAuth 2.0)**.
 
-Goal: provide **clean entities**, **useful consumables tracking**, and **developer-friendly diagnostics**, aligned with Home Assistant best practices. :contentReference[oaicite:0]{index=0}
+Goal: provide **clean entities**, **useful consumables tracking**, and **developer-friendly diagnostics**, aligned with Home Assistant best practices.
 
 ---
 
