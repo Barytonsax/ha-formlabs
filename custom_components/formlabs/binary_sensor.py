@@ -181,4 +181,4 @@ class FormlabsReadyToPrintBinarySensor(_Base, BinarySensorEntity):
     @property
     def is_on(self) -> bool:
         v = _ready_to_print_bool(self._printer())
-        return bool(v) if v is not None else False
+        return bool(v)
