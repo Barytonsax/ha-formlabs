@@ -27,6 +27,13 @@ def _printer_status_str(printer: dict[str, Any]) -> str | None:
     return str(val) if val is not None else None
 
 
+def _is_online(printer: dict[str, Any]) -> bool:
+    s = _printer_status_str(printer)
+    if s is None:
+        return False
+    return str(s).upper() not in ("OFFLINE", "DISCONNECTED", "UNKNOWN")
+
+
 def _current_print_run(printer: dict[str, Any]) -> dict[str, Any] | None:
     cpr = _printer_status(printer).get("current_print_run")
     return cpr if isinstance(cpr, dict) else None
@@ -229,7 +236,7 @@ async def async_setup_entry(
     entities: list[SensorEntity] = []
 
     for serial in printers.keys():
-        # ---- Capteurs
+        # ---- Sensors
         entities.extend(
             [
                 FormlabsPrinterStatusSensor(coordinator, serial),
@@ -269,7 +276,7 @@ async def async_setup_entry(
 
 
 # ----------------------------
-# Base entity
+# Base entities
 # ----------------------------
 class _Base(CoordinatorEntity[FormlabsCoordinator]):
     _attr_has_entity_name = True
@@ -280,6 +287,12 @@ class _Base(CoordinatorEntity[FormlabsCoordinator]):
 
     def _printer(self) -> dict[str, Any]:
         return self.coordinator.data.get("printers_by_serial", {}).get(self._serial, {})
+
+    @property
+    def available(self) -> bool:
+        # Important: do NOT depend on current_print_run here.
+        # Availability should mainly reflect coordinator health + printer connectivity.
+        return super().available and _is_online(self._printer())
 
     @property
     def device_info(self):
@@ -299,11 +312,12 @@ class _PrintRunBase(_Base):
 
     @property
     def available(self) -> bool:
-        return super().available and self._run() is not None
+        # Available even when there's no current print run (print finished).
+        return super().available
 
 
 # ----------------------------
-# Capteurs
+# Sensors
 # ----------------------------
 class FormlabsPrinterStatusSensor(_Base, SensorEntity):
     _attr_icon = "mdi:printer-3d"
@@ -315,7 +329,8 @@ class FormlabsPrinterStatusSensor(_Base, SensorEntity):
 
     @property
     def native_value(self):
-        return _printer_status_str(self._printer())
+        # Always stable when printer is online
+        return _printer_status_str(self._printer()) or "UNKNOWN"
 
 
 class FormlabsCurrentJobNameSensor(_PrintRunBase, SensorEntity):
@@ -325,26 +340,41 @@ class FormlabsCurrentJobNameSensor(_PrintRunBase, SensorEntity):
         super().__init__(coordinator, serial)
         self._attr_unique_id = f"{serial}_current_job_name"
         self._attr_name = "Current job name"
+        self._last_job_name: str | None = None
+        self._last_thumb_url: str | None = None
+        self._last_job_guid: str | None = None
 
     @property
     def native_value(self):
-        run = self._run() or {}
-        return run.get("name")
+        run = self._run()
+        if not run:
+            # Freeze last value; if nothing yet, keep a stable "Idle"
+            return self._last_job_name or "Idle"
 
-    @property
-    def extra_state_attributes(self):
-        run = self._run() or {}
-        attrs: dict[str, Any] = {}
+        val = run.get("name")
+        if val:
+            self._last_job_name = str(val)
 
-        if run.get("guid"):
-            attrs["job_guid"] = run.get("guid")
+        guid = run.get("guid")
+        if guid:
+            self._last_job_guid = str(guid)
 
         pt = run.get("print_thumbnail")
         if isinstance(pt, dict):
             thumb = pt.get("thumbnail")
             if thumb:
-                attrs["thumbnail_url"] = thumb
+                self._last_thumb_url = str(thumb)
 
+        return self._last_job_name or "Idle"
+
+    @property
+    def extra_state_attributes(self):
+        # Also freeze useful attributes
+        attrs: dict[str, Any] = {}
+        if self._last_job_guid:
+            attrs["job_guid"] = self._last_job_guid
+        if self._last_thumb_url:
+            attrs["thumbnail_url"] = self._last_thumb_url
         return attrs
 
 
@@ -358,9 +388,12 @@ class FormlabsCurrentJobStatusSensor(_PrintRunBase, SensorEntity):
 
     @property
     def native_value(self):
-        run = self._run() or {}
+        # Stable when no run
+        run = self._run()
+        if not run:
+            return "IDLE"
         status = run.get("status")
-        return str(status) if status is not None else None
+        return str(status) if status is not None else "IDLE"
 
 
 class FormlabsProgressPercentSensor(_PrintRunBase, SensorEntity):
@@ -374,7 +407,9 @@ class FormlabsProgressPercentSensor(_PrintRunBase, SensorEntity):
 
     @property
     def native_value(self):
-        run = self._run() or {}
+        run = self._run()
+        if not run:
+            return 0.0
 
         # 1) Direct progress if present (other models / future API)
         val = run.get("progress") or run.get("progress_percent")
@@ -407,7 +442,8 @@ class FormlabsProgressPercentSensor(_PrintRunBase, SensorEntity):
         except (TypeError, ValueError, ZeroDivisionError):
             pass
 
-        return None
+        # If run exists but values missing, keep stable 0 instead of None
+        return 0.0
 
 
 class FormlabsPrintVolumeMlSensor(_PrintRunBase, SensorEntity):
@@ -420,17 +456,23 @@ class FormlabsPrintVolumeMlSensor(_PrintRunBase, SensorEntity):
         super().__init__(coordinator, serial)
         self._attr_unique_id = f"{serial}_print_volume_ml"
         self._attr_name = "Print volume"
+        self._last_value: float | None = None
 
     @property
     def native_value(self):
-        run = self._run() or {}
+        run = self._run()
+        if not run:
+            # Freeze last known print volume
+            return self._last_value
+
         val = run.get("volume_ml")
         try:
             if val is None:
-                return None
-            return round(float(val), 2)
+                return self._last_value
+            self._last_value = round(float(val), 2)
+            return self._last_value
         except (TypeError, ValueError):
-            return None
+            return self._last_value
 
 
 class FormlabsCurrentLayerSensor(_PrintRunBase, SensorEntity):
@@ -443,12 +485,14 @@ class FormlabsCurrentLayerSensor(_PrintRunBase, SensorEntity):
 
     @property
     def native_value(self):
-        run = self._run() or {}
+        run = self._run()
+        if not run:
+            return 0
         val = run.get("currently_printing_layer")
         try:
-            return int(val) if val is not None else None
+            return int(val) if val is not None else 0
         except (TypeError, ValueError):
-            return None
+            return 0
 
 
 class FormlabsLayerCountSensor(_PrintRunBase, SensorEntity):
@@ -461,12 +505,14 @@ class FormlabsLayerCountSensor(_PrintRunBase, SensorEntity):
 
     @property
     def native_value(self):
-        run = self._run() or {}
+        run = self._run()
+        if not run:
+            return 0
         val = run.get("layer_count")
         try:
-            return int(val) if val is not None else None
+            return int(val) if val is not None else 0
         except (TypeError, ValueError):
-            return None
+            return 0
 
 
 class FormlabsMaterialNameSensor(_PrintRunBase, SensorEntity):
@@ -476,12 +522,18 @@ class FormlabsMaterialNameSensor(_PrintRunBase, SensorEntity):
         super().__init__(coordinator, serial)
         self._attr_unique_id = f"{serial}_material_name"
         self._attr_name = "Material"
+        self._last_value: str | None = None
 
     @property
     def native_value(self):
-        run = self._run() or {}
+        run = self._run()
+        if not run:
+            return self._last_value
+
         val = run.get("material_name") or run.get("material")
-        return str(val) if val is not None else None
+        if val is not None:
+            self._last_value = str(val)
+        return self._last_value
 
 
 class FormlabsTimeRemainingSensor(_PrintRunBase, SensorEntity):
@@ -496,15 +548,17 @@ class FormlabsTimeRemainingSensor(_PrintRunBase, SensorEntity):
 
     @property
     def native_value(self):
-        run = self._run() or {}
+        run = self._run()
+        if not run:
+            return 0
         ms = run.get("estimated_time_remaining_ms")
         try:
             if ms is None:
-                return None
+                return 0
             sec = int(float(ms) / 1000.0)
             return max(sec, 0)
         except (TypeError, ValueError):
-            return None
+            return 0
 
 
 class FormlabsElapsedTimeSensor(_PrintRunBase, SensorEntity):
@@ -519,15 +573,17 @@ class FormlabsElapsedTimeSensor(_PrintRunBase, SensorEntity):
 
     @property
     def native_value(self):
-        run = self._run() or {}
+        run = self._run()
+        if not run:
+            return 0
         ms = run.get("elapsed_duration_ms")
         try:
             if ms is None:
-                return None
+                return 0
             sec = int(float(ms) / 1000.0)
             return max(sec, 0)
         except (TypeError, ValueError):
-            return None
+            return 0
 
 
 # HMS display sensors (text)
@@ -541,8 +597,10 @@ class FormlabsTimeRemainingHmsSensor(_PrintRunBase, SensorEntity):
 
     @property
     def native_value(self):
-        run = self._run() or {}
-        return _format_hms_from_ms(run.get("estimated_time_remaining_ms"))
+        run = self._run()
+        if not run:
+            return "00:00:00"
+        return _format_hms_from_ms(run.get("estimated_time_remaining_ms")) or "00:00:00"
 
 
 class FormlabsElapsedTimeHmsSensor(_PrintRunBase, SensorEntity):
@@ -555,8 +613,10 @@ class FormlabsElapsedTimeHmsSensor(_PrintRunBase, SensorEntity):
 
     @property
     def native_value(self):
-        run = self._run() or {}
-        return _format_hms_from_ms(run.get("elapsed_duration_ms"))
+        run = self._run()
+        if not run:
+            return "00:00:00"
+        return _format_hms_from_ms(run.get("elapsed_duration_ms")) or "00:00:00"
 
 
 # Cartridge sensors
@@ -701,7 +761,8 @@ class FormlabsRawPayloadSensor(_Base, SensorEntity):
 
     @property
     def native_value(self):
-        return _printer_status_str(self._printer())
+        # Stable state marker
+        return _printer_status_str(self._printer()) or "UNKNOWN"
 
     @property
     def extra_state_attributes(self):
