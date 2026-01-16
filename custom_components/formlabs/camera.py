@@ -20,6 +20,18 @@ def _printer_status(printer: dict[str, Any]) -> dict[str, Any]:
     return ps if isinstance(ps, dict) else {}
 
 
+def _status_str(printer: dict[str, Any]) -> str | None:
+    val = _printer_status(printer).get("status")
+    return str(val) if val is not None else None
+
+
+def _is_online(printer: dict[str, Any]) -> bool:
+    s = _status_str(printer)
+    if s is None:
+        return False
+    return str(s).upper() not in ("OFFLINE", "DISCONNECTED", "UNKNOWN")
+
+
 def _current_print_run(printer: dict[str, Any]) -> dict[str, Any] | None:
     cpr = _printer_status(printer).get("current_print_run")
     return cpr if isinstance(cpr, dict) else None
@@ -82,13 +94,16 @@ class FormlabsPrintThumbnailCamera(CoordinatorEntity[FormlabsCoordinator], Camer
         self._attr_unique_id = f"{serial}_print_thumbnail_camera"
         self._attr_name = "Print thumbnail"
 
+        # Freeze last image so camera doesn't become unavailable after a print
+        self._last_image: bytes | None = None
+
     def _printer(self) -> dict[str, Any]:
         return self.coordinator.data.get("printers_by_serial", {}).get(self._serial, {})
 
     @property
     def available(self) -> bool:
-        # Available only while a signed thumbnail URL exists
-        return super().available and _thumbnail_url(self._printer()) is not None
+        # Camera availability should not depend on current_print_run.
+        return super().available and _is_online(self._printer())
 
     @property
     def device_info(self):
@@ -101,19 +116,27 @@ class FormlabsPrintThumbnailCamera(CoordinatorEntity[FormlabsCoordinator], Camer
             "sw_version": p.get("firmware_version") or p.get("firmware"),
         }
 
-    async def async_camera_image(self, width: int | None = None, height: int | None = None) -> bytes | None:
+    async def async_camera_image(
+        self, width: int | None = None, height: int | None = None
+    ) -> bytes | None:
         """
         Fetch bytes from the signed S3 thumbnail URL and proxy them to Home Assistant.
-        Signed URLs expire; when expired, return None until next coordinator refresh.
+        Signed URLs expire; we freeze the last successful image to avoid "unavailable".
         """
         url = _thumbnail_url(self._printer())
-        if not url:
-            return None
 
-        try:
-            async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                if resp.status != 200:
-                    return None
-                return await resp.read()
-        except (aiohttp.ClientError, TimeoutError):
-            return None
+        if url:
+            try:
+                async with self._session.get(
+                    url, timeout=aiohttp.ClientTimeout(total=20)
+                ) as resp:
+                    if resp.status == 200:
+                        img = await resp.read()
+                        if img:
+                            self._last_image = img
+                            return img
+            except (aiohttp.ClientError, TimeoutError):
+                pass
+
+        # No URL (print finished) or URL expired -> freeze last image
+        return self._last_image
