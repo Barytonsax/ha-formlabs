@@ -1,6 +1,7 @@
 # Formlabs – Home Assistant Integration
 
 [![HACS Custom](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://hacs.xyz/)
+[![License](https://img.shields.io/github/license/Barytonsax/ha-formlabs)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/Barytonsax/ha-formlabs)](https://github.com/Barytonsax/ha-formlabs/releases)
 
 Unofficial **Home Assistant integration for Formlabs 3D printers**, built on top of the **Formlabs Developer Cloud API (OAuth 2.0)**.
