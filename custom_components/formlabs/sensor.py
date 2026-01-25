@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 from typing import Any
+from datetime import timedelta  # ✅ NEW
 
 from homeassistant.components.sensor import SensorEntity, SensorDeviceClass
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EntityCategory, UnitOfTime, UnitOfVolume, PERCENTAGE
+from homeassistant.const import (
+    EntityCategory,
+    UnitOfTime,
+    UnitOfVolume,
+    UnitOfLength,
+    PERCENTAGE,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -83,6 +90,30 @@ def _format_hms_from_ms(ms: int | float | None) -> str | None:
     except (TypeError, ValueError):
         return None
     return _format_hms(sec)
+
+
+def _eta_from_remaining_ms(ms: int | float | None):
+    """Return absolute UTC datetime (ETA) from remaining ms."""
+    if ms is None:
+        return None
+    try:
+        remaining_ms = int(float(ms))
+    except (TypeError, ValueError):
+        return None
+    if remaining_ms <= 0:
+        return dt_util.utcnow()
+    return dt_util.utcnow() + timedelta(milliseconds=remaining_ms)
+
+
+def _format_hhmm(dt) -> str | None:
+    """Format a datetime as local HH:MM."""
+    if not dt:
+        return None
+    try:
+        local = dt_util.as_local(dt)
+        return local.strftime("%H:%M")
+    except Exception:
+        return None
 
 
 # ----------------------------
@@ -247,11 +278,16 @@ async def async_setup_entry(
                 FormlabsCurrentLayerSensor(coordinator, serial),
                 FormlabsLayerCountSensor(coordinator, serial),
                 FormlabsMaterialNameSensor(coordinator, serial),
+                FormlabsLayerThicknessSensor(coordinator, serial),  # ✅ NEW
                 FormlabsTimeRemainingSensor(coordinator, serial),
                 FormlabsElapsedTimeSensor(coordinator, serial),
                 # HMS display sensors
                 FormlabsTimeRemainingHmsSensor(coordinator, serial),
                 FormlabsElapsedTimeHmsSensor(coordinator, serial),
+                # ✅ ETA (timestamp)
+                FormlabsEtaSensor(coordinator, serial),
+                # ✅ ETA (HH:MM)
+                FormlabsEtaHhmmSensor(coordinator, serial),
                 # Consumables
                 FormlabsCartridgeMaterialSensor(coordinator, serial),
                 FormlabsCartridgeVolumeRemainingSensor(coordinator, serial),
@@ -536,6 +572,35 @@ class FormlabsMaterialNameSensor(_PrintRunBase, SensorEntity):
         return self._last_value
 
 
+class FormlabsLayerThicknessSensor(_PrintRunBase, SensorEntity):
+    """Layer thickness (mm) for current print run (layer_thickness_mm)."""
+
+    _attr_icon = "mdi:arrow-expand-vertical"
+    _attr_native_unit_of_measurement = UnitOfLength.MILLIMETERS
+
+    def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
+        super().__init__(coordinator, serial)
+        self._attr_unique_id = f"{serial}_layer_thickness_mm"
+        self._attr_name = "Layer thickness"
+        self._last_value: float | None = None
+
+    @property
+    def native_value(self):
+        run = self._run()
+        if not run:
+            # Freeze last known value (useful just after print finished)
+            return self._last_value
+
+        val = run.get("layer_thickness_mm")
+        try:
+            if val is None:
+                return self._last_value
+            self._last_value = float(val)
+            return self._last_value
+        except (TypeError, ValueError):
+            return self._last_value
+
+
 class FormlabsTimeRemainingSensor(_PrintRunBase, SensorEntity):
     _attr_icon = "mdi:timer-sand"
     _attr_device_class = SensorDeviceClass.DURATION
@@ -617,6 +682,43 @@ class FormlabsElapsedTimeHmsSensor(_PrintRunBase, SensorEntity):
         if not run:
             return "00:00:00"
         return _format_hms_from_ms(run.get("elapsed_duration_ms")) or "00:00:00"
+
+
+# ✅ ETA sensor (timestamp)
+class FormlabsEtaSensor(_PrintRunBase, SensorEntity):
+    _attr_icon = "mdi:clock-end"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+
+    def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
+        super().__init__(coordinator, serial)
+        self._attr_unique_id = f"{serial}_eta"
+        self._attr_name = "ETA"
+
+    @property
+    def native_value(self):
+        run = self._run()
+        if not run:
+            return None
+        return _eta_from_remaining_ms(run.get("estimated_time_remaining_ms"))
+
+
+# ✅ ETA sensor (HH:MM) - text
+class FormlabsEtaHhmmSensor(_PrintRunBase, SensorEntity):
+    _attr_icon = "mdi:clock-end"
+    # NOTE: no device_class => we want plain text HH:MM
+
+    def __init__(self, coordinator: FormlabsCoordinator, serial: str) -> None:
+        super().__init__(coordinator, serial)
+        self._attr_unique_id = f"{serial}_eta_hhmm"
+        self._attr_name = "ETA (HH:MM)"
+
+    @property
+    def native_value(self):
+        run = self._run()
+        if not run:
+            return None
+        eta = _eta_from_remaining_ms(run.get("estimated_time_remaining_ms"))
+        return _format_hhmm(eta)
 
 
 # Cartridge sensors
