@@ -21,6 +21,24 @@ The goal of this integration is to provide **clean, stable entities**, **useful 
 
 ---
 
+## 🆕 Updates & Changelog
+
+This integration evolves frequently to improve stability and support more Formlabs models.
+
+**What to check when updating:**
+- Read the GitHub **Releases** notes before updating (breaking changes / new entities / migrations).
+- After updating, **restart Home Assistant** (recommended).
+- If entities look stale: **reload the integration** or restart HA.
+
+**Recent improvements you can expect across versions:**
+- Better handling of sensors that used to become `Unknown/Unavailable` after a print ends.
+- More consistent cross-model mappings (Form 4 vs Form 3/3L API differences).
+- Incremental additions of job/consumables fields and diagnostics for easier debugging.
+
+> Tip: if you use the thumbnail on dashboards, prefer the **camera entity** approach (see Media section) to avoid “expired URL” issues.
+
+---
+
 ## 🖨️ Features
 
 ### Printers & Jobs
